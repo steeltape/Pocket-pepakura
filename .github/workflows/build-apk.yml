@@ -1,0 +1,101 @@
+name: Build Pocket Pepakura Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  android-debug:
+    runs-on: ubuntu-24.04
+    container:
+      image: barichello/godot-ci:4.6
+
+    steps:
+      - name: Check out files
+        uses: actions/checkout@v4
+
+      - name: Unpack the complete Godot source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -s PocketPepakura_Source_v5.zip ]; then
+            echo 'ERROR: PocketPepakura_Source_v5.zip is not in the repository root.'
+            echo 'Upload the single source ZIP using Add file > Upload files.'
+            exit 1
+          fi
+          mkdir -p app
+          unzip -q -o PocketPepakura_Source_v5.zip -d app
+          for file in project.godot main.tscn export_presets.cfg scripts/main.gd scripts/page_canvas.gd scripts/pdo_reader.gd samples/demo_pages.json; do
+            if [ ! -s "app/$file" ]; then
+              echo "ERROR: Missing app/$file inside source ZIP"
+              exit 1
+            fi
+          done
+          echo 'Project restored with all required scripts.'
+          find app -maxdepth 2 -type f | sort
+
+      - name: Set up Android SDK 35 and Godot templates
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/godot" "$HOME/.local/share/godot/export_templates"
+          if [ "$HOME" != "/root" ] && [ -d /root/.config/godot ]; then
+            cp -a /root/.config/godot/. "$HOME/.config/godot/"
+          fi
+          if [ "$HOME" != "/root" ] && [ -d /root/.local/share/godot/export_templates/4.6.stable ]; then
+            cp -a /root/.local/share/godot/export_templates/4.6.stable "$HOME/.local/share/godot/export_templates/"
+          fi
+          godot --version
+          test -f "$HOME/.local/share/godot/export_templates/4.6.stable/android_debug.apk"
+          test -f /root/debug.keystore
+          # Godot 4.6 expects Android Platform 35 / Build-Tools 35.0.1.
+          sdkmanager --sdk_root="$ANDROID_HOME" "platform-tools" "platforms;android-35" "build-tools;35.0.1"
+          test -f "$ANDROID_HOME/build-tools/35.0.1/apksigner"
+          test -f "$ANDROID_HOME/platforms/android-35/android.jar"
+
+      - name: Validate complete Godot project
+        shell: bash
+        run: |
+          set -euo pipefail
+          godot --headless --path app --editor --quit 2>&1 | tee godot-import.log
+          if grep -E 'SCRIPT ERROR|Parse Error|Parser Error|Failed loading resource|File not found' godot-import.log; then
+            echo 'Godot reported a project error. See godot-import.log.'
+            exit 1
+          fi
+
+      - name: Export Android debug APK
+        shell: bash
+        env:
+          GODOT_ANDROID_KEYSTORE_DEBUG_PATH: /root/debug.keystore
+          GODOT_ANDROID_KEYSTORE_DEBUG_USER: androiddebugkey
+          GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: android
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          godot --headless --path app --export-debug Android "$PWD/dist/PocketPepakura-v5-debug.apk" 2>&1 | tee godot-export.log
+          test -s dist/PocketPepakura-v5-debug.apk
+          unzip -t dist/PocketPepakura-v5-debug.apk | tail -n 2
+
+      - name: Downloadable debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PocketPepakura-Android-debug
+          path: dist/PocketPepakura-v5-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload diagnostic logs if build fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PocketPepakura-build-logs
+          path: |
+            godot-import.log
+            godot-export.log
+          if-no-files-found: ignore
+          retention-days: 7
