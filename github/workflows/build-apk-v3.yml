@@ -1,0 +1,116 @@
+name: Build Pocket Pepakura Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  android-debug:
+    runs-on: ubuntu-24.04
+    container:
+      image: barichello/godot-ci:4.6
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Unpack source and fix Android configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s PocketPepakura_Source_v5.zip || { echo 'Missing PocketPepakura_Source_v5.zip at repository root'; exit 1; }
+          mkdir -p app
+          unzip -q -o PocketPepakura_Source_v5.zip -d app
+          for file in project.godot main.tscn export_presets.cfg scripts/main.gd scripts/page_canvas.gd scripts/pdo_reader.gd samples/demo_pages.json; do
+            test -s "app/$file" || { echo "Missing project file: app/$file"; exit 1; }
+          done
+          # Godot 4.6 needs ETC2/ASTC import enabled for Android export.
+          if ! grep -Eq '^textures/vram_compression/import_etc2_astc=true$' app/project.godot; then
+            test "$(grep -c '^\[rendering\]$' app/project.godot)" -eq 1
+            sed -i '/^\[rendering\]$/a textures/vram_compression/import_etc2_astc=true' app/project.godot
+          fi
+          # Make sure users can launch the APK from their Android home screen.
+          sed -i 's/^package\/show_as_launcher_app=false$/package\/show_as_launcher_app=true/' app/export_presets.cfg
+          echo 'Android ETC2/ASTC setting:'
+          grep 'textures/vram_compression/import_etc2_astc' app/project.godot
+          echo 'Launcher setting:'
+          grep 'package/show_as_launcher_app=' app/export_presets.cfg
+
+      - name: Install Android 35 and configure Godot paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/godot" "$HOME/.local/share/godot/export_templates"
+          if [ "$HOME" != "/root" ] && [ -d /root/.local/share/godot/export_templates/4.6.stable ]; then
+            cp -a /root/.local/share/godot/export_templates/4.6.stable "$HOME/.local/share/godot/export_templates/"
+          fi
+          godot --version
+          test -f "$HOME/.local/share/godot/export_templates/4.6.stable/android_debug.apk"
+          test -f /root/debug.keystore
+          sdkmanager --sdk_root="$ANDROID_HOME" "platform-tools" "platforms;android-35" "build-tools;35.0.1"
+          test -f "$ANDROID_HOME/build-tools/35.0.1/apksigner"
+          test -f "$ANDROID_HOME/platforms/android-35/android.jar"
+          test -x "$ANDROID_HOME/platform-tools/adb"
+          JAVA_SDK_PATH="$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")"
+          test -x "$JAVA_SDK_PATH/bin/java"
+          # EditorSettings are per-user, and Godot 4.6 expects editor_settings-4.6.tres.
+          cat > "$HOME/.config/godot/editor_settings-4.6.tres" <<EOF
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/java_sdk_path = "$JAVA_SDK_PATH"
+          export/android/android_sdk_path = "$ANDROID_HOME"
+          export/android/debug_keystore = "/root/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          EOF
+          echo "Using Java: $JAVA_SDK_PATH"
+          echo "Using Android SDK: $ANDROID_HOME"
+          cat "$HOME/.config/godot/editor_settings-4.6.tres"
+
+      - name: Validate project
+        shell: bash
+        run: |
+          set -euo pipefail
+          godot --headless --path app --editor --quit 2>&1 | tee godot-import.log
+          if grep -E 'SCRIPT ERROR|Parse Error|Parser Error|Failed loading resource|File not found' godot-import.log; then
+            echo 'Godot import validation failed.'
+            exit 1
+          fi
+
+      - name: Export debug APK
+        shell: bash
+        env:
+          GODOT_ANDROID_KEYSTORE_DEBUG_PATH: /root/debug.keystore
+          GODOT_ANDROID_KEYSTORE_DEBUG_USER: androiddebugkey
+          GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: android
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          godot --headless --verbose --path app --export-debug Android "$PWD/dist/PocketPepakura-v5-debug.apk" 2>&1 | tee godot-export.log
+          test -s dist/PocketPepakura-v5-debug.apk
+          unzip -t dist/PocketPepakura-v5-debug.apk | tail -n 2
+
+      - name: Upload installable debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PocketPepakura-Android-debug
+          path: dist/PocketPepakura-v5-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload diagnostic logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PocketPepakura-build-logs
+          path: |
+            godot-import.log
+            godot-export.log
+          if-no-files-found: ignore
+          retention-days: 7
