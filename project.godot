@@ -1,0 +1,17 @@
+config_version=5
+
+[application]
+config/name="Pocket Pepakura — Paper & Model"
+run/main_scene="res://main.tscn"
+
+[display]
+window/size/viewport_width=900
+window/size/viewport_height=1500
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
+window/handheld/orientation=6
+
+[rendering]
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+environment/defaults/default_clear_color=Color(0.09, 0.12, 0.16, 1)
